@@ -1,0 +1,12 @@
+[project]
+name = "autoscaling-ollama-k8s"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "celery>=5.5.3",
+    "ollama>=0.6.1",
+    "redis>=7.1.0",
+    "streamlit>=1.51.0",
+]
