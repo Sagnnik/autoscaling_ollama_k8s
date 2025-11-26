@@ -15,15 +15,20 @@ def streaming_data():
     st.info(f"Subscribed to {channel_id}")
     try:
         while True:
-            message = pubsub.get_message(ignore_subscribe_messaegs = True, timeout=1)
-            if message and message['type'] == 'message':
+            message = pubsub.get_message(ignore_subscribe_messages=True)
+            # prevents 100% CPU
+            if not message:
+                time.sleep(0.01)   
+                continue
+
+            if message and message['type'] == "message":
                 data = message['data']
-                if data == '[done]':
+                if data == '[DONE]':
                     break
                 yield data
-            time.sleep(0.01)
     finally:
-        pubsub.unsubscibe(channel_id)
+        pubsub.unsubscribe(channel_id)
+        pubsub.close()
         redis_client.close()
 
 # Main UI
@@ -50,6 +55,6 @@ if prompt := st.chat_input("what's up?"):
                 full_response.append(chunk)
                 yield chunk
 
-        response = st.write_stream(lambda: collect_stream(streaming_data()))
+        response = st.write_stream(collect_stream(streaming_data()))
 
     st.session_state.messages.append({"role": "assistant", "content": "".join(full_response)})
