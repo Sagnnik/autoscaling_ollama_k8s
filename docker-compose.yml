@@ -1,4 +1,3 @@
-version: '3.9'
 services:
   redis:
     image: redis:7-alpine
@@ -20,7 +19,7 @@ services:
     volumes:
       - /mnt/d/docker_vo/ollama_data:/root/.ollama
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/"]
+      test: ["CMD", "/bin/sh", "-c", "ollama list || exit 0"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -37,7 +36,7 @@ services:
   streamlit:
     build: .
     container_name: streamlit_app
-    command: ["streamlit", "run", "main.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    command: ["uv", "run", "streamlit", "run", "main.py", "--server.port=8501", "--server.address=0.0.0.0"]
     environment:
       REDIS_URL: "redis://redis:6379/0"
       OLLAMA_HOST: "http://ollama:11434"
@@ -53,7 +52,7 @@ services:
   worker:
     build: .
     container_name: celery_worker
-    command: ["celery", "-A", "worker.celery_app", "worker", "-l", "info"]
+    command: ["uv", "run", "celery", "-A", "worker.celery_app", "worker", "-l", "info"]
     environment:
       REDIS_URL: "redis://redis:6379/0"
       OLLAMA_HOST: "http://ollama:11434"
@@ -63,3 +62,20 @@ services:
       ollama:
         condition: service_healthy
     restart: unless-stopped
+
+  flower:
+    build: .
+    container_name: celery_flower
+    command: ["uv", "run", "celery", "-A", "worker.celery_app", "flower", "--port=5555"]
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+      OLLAMA_HOST: "http://ollama:11434"
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    ports:
+      - "5555:5555"
+    restart: unless-stopped
+    
