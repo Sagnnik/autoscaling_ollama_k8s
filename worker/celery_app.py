@@ -33,13 +33,11 @@ celery_app.conf.update(
     retry_kwargs={'max_retries': 3},
     retry_backoff=True,
     retry_jitter=True)
-def ollama_stream(self, query:str, channel_id:str):
+def ollama_stream(self, query:str, channel_id:str, model_name:str):
     logger.info(f"Starting ollama_stream task for channel: {channel_id}")
     try:
         ollama_client = Client(host=OLLAMA_HOST)
         redis_client = get_redis_client() 
-
-        model = 'qwen3:1.7b'
         messages = [
             {
                 'role': 'user',
@@ -47,7 +45,7 @@ def ollama_stream(self, query:str, channel_id:str):
             }
         ]
         self.update_state(state='STREAMING', meta={'channel_id':channel_id})
-        for chunk in ollama_client.chat(model=model, messages=messages, stream=True):
+        for chunk in ollama_client.chat(model=model_name, messages=messages, stream=True):
             content = chunk.message.content
             redis_client.publish(channel_id, content)
         redis_client.publish(channel_id, '[DONE]')

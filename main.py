@@ -4,6 +4,13 @@ from worker.celery_app import ollama_stream
 from services.redis_client import get_redis_client
 import time
 
+st.set_page_config(
+    page_title="LLM Autoscaler",
+    page_icon="🤖",
+    layout="centered",
+    initial_sidebar_state="expanded"
+)
+
 if "channel_id" not in st.session_state:
     st.session_state.channel_id = uuid4().hex
 
@@ -33,6 +40,15 @@ def streaming_data():
 
 # Main UI
 st.title("LLM Autoscaler")
+
+with st.sidebar:
+    if st.button('New Chat', type='primary'):
+        st.session_state.messages = []
+        st.session_state.channel_id = str(uuid4().hex)
+        st.rerun()
+
+    model_name = st.selectbox("Select a model", ('qwen2.5:0.5b', 'qwen3:1.7b', 'qwen3:4b'))
+
 if 'messages' not in st.session_state:
     st.session_state.messages = []
 
@@ -42,7 +58,7 @@ for message in st.session_state.messages:
 
 if prompt := st.chat_input("what's up?"):
     # enqueue task
-    ollama_stream.delay(prompt, channel_id)
+    ollama_stream.delay(prompt, channel_id, model_name)
     st.session_state.messages.append({'role': 'user', 'content': prompt})
     with st.chat_message('user'):
         st.markdown(prompt)
