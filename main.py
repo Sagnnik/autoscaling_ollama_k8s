@@ -1,8 +1,14 @@
 import streamlit as st
 from uuid import uuid4
+from ollama import Client
 from worker.celery_app import ollama_stream
 from services.redis_client import get_redis_client
 import time
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 st.set_page_config(
     page_title="LLM Autoscaler",
@@ -47,7 +53,20 @@ with st.sidebar:
         st.session_state.channel_id = str(uuid4().hex)
         st.rerun()
 
-    model_name = st.selectbox("Select a model", ('qwen2.5:0.5b', 'qwen3:1.7b', 'qwen3:4b'))
+    try:
+        o_client = Client(host=OLLAMA_HOST)
+        pulled_models = o_client.list()
+        model_list = set()
+        for model in pulled_models.get('models', []):
+            model_list.add(model.get('model'))
+
+    except Exception as e:
+        st.exception("Failed loading pulled model list", str(e))
+
+    if model_list:
+        model_name = st.selectbox("Select a model", model_list)
+    else:
+        model_name = st.selectbox("Select a model", ('qwen2.5:0.5b', 'qwen3:1.7b', 'qwen3:4b'))
 
 if 'messages' not in st.session_state:
     st.session_state.messages = []

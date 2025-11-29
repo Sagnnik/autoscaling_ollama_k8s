@@ -25,6 +25,11 @@ celery_app.conf.update(
     result_expires=3600,  # 1 hour
 )
 
+def get_queued_models():
+    """Get models that have requests in the task queue"""
+    queued_models = set()
+    pass
+
 @celery_app.task(
     bind=True, 
     acks_late=True,
