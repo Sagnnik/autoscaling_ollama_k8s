@@ -2,7 +2,8 @@ from celery import Celery
 from services.logger import logger
 from ollama import Client
 from services.redis_client import get_redis_client
-from utils.manage_models import load_or_queue_model, mark_model_active, mark_model_inactive, cleanup_inactive_model_tracking
+from utils.manage_models import load_or_queue_model, cleanup_inactive_model_tracking
+from services.cache import mark_model_active, mark_model_inactive, mark_model_queued, mark_model_dequeued
 from dotenv import load_dotenv
 import os
 
@@ -25,11 +26,6 @@ celery_app.conf.update(
     task_time_limit=360,  # 6 min
     result_expires=3600,  # 1 hour
 )
-
-def get_queued_models():
-    """Get models that have requests in the task queue"""
-    queued_models = set()
-    pass
 
 # Need to create these tasks:
 # 1. Model Loading with VRAM Management
@@ -55,6 +51,7 @@ def manage_model_loading(self, model_name:str, gpu_index: int=0):
     4. Loads the requested model
     """
     logger.info(f"Task {self.request.id}: Managing model loading for {model_name}")
+
     try:
         self.update_state(state='LOADING_MODEL', meta={'model_name': model_name})
         result = load_or_queue_model(model_name, gpu_index)
@@ -90,6 +87,7 @@ def ollama_stream(self, query:str, channel_id:str, model_name:str):
 
     logger.info(f"Task {self.request.id}: Starting ollama_stream for channel: {channel_id}")
     mark_model_active(model_name, self.request.id)
+    mark_model_dequeued(model_name, self.request.id)
     try:
         ollama_client = Client(host=OLLAMA_HOST)
         redis_client = get_redis_client() 
@@ -155,6 +153,7 @@ def process_ollama_request(self, query: str, model_name: str, channel_id: str, g
 
         self.update_state(state='STREAMING', meta={'model_name': model_name, 'channel_id': channel_id})
         streaming_result = ollama_stream(query=query, channel_id=channel_id, model_name=model_name)
+        mark_model_queued(model_name, ollama_stream.id)
 
         return {
             'status': 'completed',

@@ -3,7 +3,7 @@ import ollama
 from ollama import Client
 from services.logger import logger
 from services.redis_client import get_redis_client
-from worker.celery_app import get_queued_models
+from services.cache import get_active_models, get_queued_models
 import os
 from dotenv import load_dotenv
 
@@ -56,29 +56,7 @@ def get_model_size(client: ollama.Client, model_name:str):
     except Exception as e:
         logger.exception(f"Error in getting model info: {str(e)}")
 
-def mark_model_active(model_name:str, task_id: str):
-    """Mark a model thats actively processing a request"""
-    redis_client = get_redis_client()
-    redis_client.sadd(f"active_model:{model_name}", task_id)
-    logger.info(f"Marked model {model_name} as active for task {task_id}")
 
-def mark_model_inactive(model_name:str, task_id:str):
-    """Remove a task from the active model set"""
-    redis_client = get_redis_client()
-    redis_client.srem(f"active_model:{model_name}", task_id)
-    logger.info(f"Marked model {model_name} inactive for task {task_id}")
-
-def get_active_models():
-    r = get_redis_client()
-    active = set()
-
-    for key in r.scan_iter('active_model:*'):
-        if r.scard(key) > 0:
-            model_name = key.replace('active_model:', '')
-            active.add(model_name)
-
-    logger.info(f"Active Models: {active}")
-    return active
 
 def load_or_queue_model(model_name:str, gpu_index:int=0):
     """
