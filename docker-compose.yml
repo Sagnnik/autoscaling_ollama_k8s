@@ -63,6 +63,21 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  celerybeat:
+    build: .
+    container_name: celery_beat
+    command: ["uv", "run", "celery", "-A", "worker.celery_app", "beat", "-l", "info"]
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+      OLLAMA_HOST: "http://ollama:11434"
+    depends_on:
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    
+
   flower:
     build: .
     container_name: celery_flower
