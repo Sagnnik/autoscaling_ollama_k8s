@@ -1,7 +1,7 @@
 import streamlit as st
 from uuid import uuid4
 from ollama import Client
-from worker.celery_app import ollama_stream
+from worker.celery_app import process_ollama_request
 from services.redis_client import get_redis_client
 import time
 import os
@@ -77,7 +77,7 @@ for message in st.session_state.messages:
 
 if prompt := st.chat_input("what's up?"):
     # enqueue task
-    ollama_stream.delay(prompt, channel_id, model_name)
+    process_ollama_request.delay(query=prompt, channel_id=channel_id, model_name=model_name)
     st.session_state.messages.append({'role': 'user', 'content': prompt})
     with st.chat_message('user'):
         st.markdown(prompt)

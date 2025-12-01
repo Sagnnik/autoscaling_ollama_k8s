@@ -4,7 +4,7 @@ from services.logger import logger
 from ollama import Client
 from services.redis_client import get_redis_client
 from utils.manage_models import load_or_queue_model, cleanup_inactive_model_tracking
-from services.cache import mark_model_active, mark_model_inactive, mark_model_queued, mark_model_dequeued
+from services.cache import mark_model_active, mark_model_inactive, mark_model_reserved, mark_model_unreserved
 from dotenv import load_dotenv
 import os
 
@@ -43,7 +43,7 @@ def stream_ollama_to_redis(query:str, channel_id:str, model_name:str, task_id:st
     o_client = Client(host=OLLAMA_HOST)
 
     mark_model_active(model_name, task_id)
-    mark_model_dequeued(model_name, task_id)
+    mark_model_unreserved(model_name, task_id)
 
     try:
         messages = [{"role": "user", "content": query}]
@@ -91,14 +91,14 @@ def process_ollama_request(self, query:str, model_name:str, channel_id:str, gpu_
         status = loading_result.get('status')
         
         if status == 'loaded':
-            self.update_status(state="STREAMING", meta={"model_name": model_name, "channel_id": channel_id})
-            mark_model_queued(model_name, task_id) 
+            self.update_state(state="STREAMING", meta={"model_name": model_name, "channel_id": channel_id})
+            mark_model_reserved(model_name, task_id) 
             streaming_result = stream_ollama_to_redis(query=query, model_name=model_name, channel_id=channel_id, task_id=task_id)
             return streaming_result
         
         elif status == "insufficient_vram":
             logger.info(f"Task {task_id}: Insufficient VRAM, queuing model '{model_name}' and retrying later")
-            mark_model_queued(model_name, task_id) 
+            mark_model_reserved(model_name, task_id) 
             raise self.retry(countdown=5)
         
         elif status == "error": 
@@ -122,7 +122,7 @@ def process_ollama_request(self, query:str, model_name:str, channel_id:str, gpu_
             r.publish(channel_id, "[DONE]")
         except Exception:
             pass
-        mark_model_dequeued(model_name, task_id)
+        mark_model_unreserved(model_name, task_id)
         return {"status": "error", "message": msg}
     
     except Exception as e:

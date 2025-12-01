@@ -25,12 +25,12 @@ def get_active_models():
     logger.info(f"Active Models: {active}")
     return active
 
-def mark_model_queued(model_name:str, task_id:str):
+def mark_model_reserved(model_name:str, task_id:str):
     r = get_redis_client()
     r.sadd(f"queued_model:{model_name}", task_id)
     logger.info(f"Marked model {model_name} as QUEUED for task {task_id}")
 
-def mark_model_dequeued(model_name: str, task_id: str):
+def mark_model_unreserved(model_name: str, task_id: str):
     r = get_redis_client()
     r.srem(f"queued_model:{model_name}", task_id)
     logger.info(f"Marked model {model_name} as DEQUEUED for task {task_id}")

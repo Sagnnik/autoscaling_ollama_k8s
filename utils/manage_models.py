@@ -41,20 +41,45 @@ def get_vram_usage(gpu_index:int=0):
         logger.exception(f"Error in getting vram usage: {str(e)}")
 
 
-def get_model_size(client: ollama.Client, model_name:str):
+def get_model_size(client: ollama.Client, model_name: str):
     try:
         pulled_models = client.list()
-        for model in pulled_models.get('models', []):
-            if model['model'] == model_name:
+        models = pulled_models.get('models', [])
+
+        # Debug log (just while you’re testing)
+        logger.info(f"get_model_size: looking for model_name={model_name!r} in ollama list()")
+
+        for model in models:
+            entry_name = model.get('name')
+            entry_model = model.get('model')
+
+            # Match on either field to be safe across Ollama versions
+            if entry_name == model_name or entry_model == model_name:
                 model_size = model.get('size')
+                if model_size is None:
+                    logger.warning(
+                        f"Model entry found for {model_name} but no 'size' field. "
+                        f"Entry: {model}"
+                    )
+                    return None
+
                 model_size_mib = model_size / (1024**2)
+                logger.info(
+                    f"get_model_size: found model {model_name!r} with size {model_size_mib:.2f} MiB "
+                    f"(raw size={model_size})"
+                )
                 return model_size_mib
-            
-        logger.warning(f"No size field in model")
+
+        # If we reach here, the model name didn’t match *any* entry
+        logger.warning(
+            f"get_model_size: model {model_name!r} not found in ollama list(). "
+            f"Available models: {[m.get('name') or m.get('model') for m in models]}"
+        )
         return None
-    
+
     except Exception as e:
-        logger.exception(f"Error in getting model info: {str(e)}")
+        logger.exception(f"Error in getting model info for {model_name!r}: {str(e)}")
+        return None
 
 
 
@@ -203,7 +228,7 @@ def cleanup_inactive_model_tracking():
         loaded_model_names = {model.get('name') for model in loaded_models.get('models', [])}
 
         for key in r.scan_iter('active_model:*'):
-            model_name = key.replace('active_model', '')
+            model_name = key.replace('active_model:', '')
 
             if model_name not in loaded_model_names:
                 r.delete(key)

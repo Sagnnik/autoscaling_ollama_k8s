@@ -61,6 +61,11 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
     restart: unless-stopped
 
   celerybeat:
