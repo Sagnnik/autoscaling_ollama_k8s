@@ -59,20 +59,60 @@ with st.sidebar:
         st.session_state.channel_id = str(uuid4().hex)
         st.rerun()
 
+    o_client = None
     try:
         o_client = Client(host=OLLAMA_HOST)
-        pulled_models = o_client.list()
-        model_list = set()
-        for model in pulled_models.get('models', []):
-            model_list.add(model.get('model'))
-
     except Exception as e:
-        st.exception("Failed loading pulled model list", str(e))
+        st.error(f"Failed to connect to Ollama at {OLLAMA_HOST}: {e}")
+    st.subheader("Model management")
+
+    default_models = ['qwen2.5:0.5b', 'qwen3:1.7b', 'qwen3:4b']
+    preset_model = st.selectbox("Choose a preset model", default_models)
+    custom_model = st.text_input("Or enter another model name", placeholder="e.g. llama3:8b")
+
+    model_to_pull = custom_model.strip() if custom_model.strip() else preset_model
+
+    if o_client is not None:
+        if st.button("Pull model"):
+            status_placeholder = st.empty()
+            try:
+                with st.spinner(f"Pulling `{model_to_pull}` from Ollama..."):
+                    # stream=True returns progress chunks
+                    for progress in o_client.pull(model=model_to_pull, stream=True):
+                        # progress is typically a dict with fields like status, completed, total, digest
+                        status = progress.get("status", "")
+                        completed = progress.get("completed")
+                        total = progress.get("total")
+                        if completed is not None and total:
+                            status_placeholder.write(
+                                f"{status} - {completed}/{total} bytes"
+                            )
+                        else:
+                            status_placeholder.write(status)
+
+                st.success(f"Model `{model_to_pull}` pulled successfully ✅")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to pull model `{model_to_pull}`: {e}")
+
+    model_list = set()
+    if o_client is not None:
+        try:
+            pulled_models = o_client.list()
+            for model in pulled_models.get('models', []):
+                m = model.get('model')
+                if m:
+                    model_list.add(m)
+        except Exception as e:
+            st.error(f"Failed loading pulled model list: {e}")
 
     if model_list:
-        model_name = st.selectbox("Select a model", model_list)
+        model_name = st.selectbox("Select a model to chat with", sorted(model_list))
     else:
-        model_name = st.selectbox("Select a model", ('qwen2.5:0.5b', 'qwen3:1.7b', 'qwen3:4b'))
+        model_name = st.selectbox(
+            "Select a model to chat with",
+            tuple(default_models)
+        )
 
 if 'messages' not in st.session_state:
     st.session_state.messages = []
