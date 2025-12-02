@@ -1,4 +1,4 @@
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm AS builder
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -10,7 +10,14 @@ WORKDIR /app
 
 COPY uv.lock pyproject.toml ./
 
-RUN uv sync --frozen
+RUN uv venv && . /app/.venv/bin/activate && uv sync --frozen
+
+FROM python:3.12-slim-bookworm AS final
+
+COPY --from=builder /bin/uv /usr/bin/
+COPY --from=builder /app/.venv /app/.venv/
+
+WORKDIR /app
 
 COPY . .
 
