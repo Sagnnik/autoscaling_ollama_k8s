@@ -5,6 +5,7 @@ from services.logger import logger
 from services.redis_client import get_redis_client
 from services.cache import get_active_models, get_queued_models
 import os
+from itertools import combinations
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -46,14 +47,10 @@ def get_model_size(client: ollama.Client, model_name: str):
         pulled_models = client.list()
         models = pulled_models.get('models', [])
 
-        # Debug log (just while you’re testing)
-        logger.info(f"get_model_size: looking for model_name={model_name!r} in ollama list()")
-
         for model in models:
             entry_name = model.get('name')
             entry_model = model.get('model')
 
-            # Match on either field to be safe across Ollama versions
             if entry_name == model_name or entry_model == model_name:
                 model_size = model.get('size')
                 if model_size is None:
@@ -70,7 +67,6 @@ def get_model_size(client: ollama.Client, model_name: str):
                 )
                 return model_size_mib
 
-        # If we reach here, the model name didn’t match *any* entry
         logger.warning(
             f"get_model_size: model {model_name!r} not found in ollama list(). "
             f"Available models: {[m.get('name') or m.get('model') for m in models]}"
@@ -80,8 +76,31 @@ def get_model_size(client: ollama.Client, model_name: str):
     except Exception as e:
         logger.exception(f"Error in getting model info for {model_name!r}: {str(e)}")
         return None
+    
+def select_models_to_offload(offloadable_models, required_extra):
+    """
+    Knapsack Brute Force to select the optimal subset of models to offload
+    required_extra: float (mib) - how much vram we still need to free
+    """
+    if required_extra <=0:
+        return []
+    
+    best_subset = None
+    best_total = float('inf')
 
+    n = len(offloadable_models)
+    for r in range(1, n+1):
+        for combo in combinations(offloadable_models, r):
+            total = sum(m['size'] for m in combo)
+            if total >= required_extra:
+                # minimize total freed vram
+                # tie-break by fewer models
+                if (total < best_total or
+                    (total == best_total and (best_total is None or len(combo)<len(best_subset)))):
+                    best_total = total
+                    best_subset = combo
 
+    return list(best_subset) if best_subset is not None else []
 
 def load_or_queue_model(model_name:str, gpu_index:int=0):
     """
@@ -90,10 +109,10 @@ def load_or_queue_model(model_name:str, gpu_index:int=0):
     1. If the model size is more than total vram, throw error
     2. Load the model if there is enough free vram
     3. If there isn't enough free vram then 
-        - see if there are inactive models for unloading
+        - see if there are inactive models for offloading
         - see there isn't same model request in the task queue already
         - if same models are in queue add task to queue
-        - unload in smallest models first
+        - offload in smallest models first
         - queue the request if unable to free enough vram
 
     Returns:
@@ -140,18 +159,18 @@ def load_or_queue_model(model_name:str, gpu_index:int=0):
             ollama_client.generate(model=model_name, prompt="", keep_alive=-1)
             return {"status": "loaded", "message": "Model loaded successfully", "model": model_name}
 
-        # Case 2 & 3: Not enough free VRAM - try to unload idle models
+        # Case 2 & 3: Not enough free VRAM - try to offload idle models
         logger.info(f"Insufficient VRAM ({vram_usage['free']:.2f} MiB). Attempting to free space...")
         
-        # Get models that should NOT be unloaded
+        # Get models that should NOT be offloaded
         active_models = get_active_models()
         queued_models = get_queued_models()
         protected_models = active_models.union(queued_models)
         
         logger.info(f"Protected models (active or queued): {protected_models}")
         
-        # Build list of unloadable models with their sizes
-        unloadable_models = []
+        # Build list of offloadable models with their sizes
+        offloadable_models = []
         for model in loaded_models.get('models', []):
             model_name_loaded = model.get('name')
             
@@ -159,13 +178,13 @@ def load_or_queue_model(model_name:str, gpu_index:int=0):
                 logger.info(f"Skipping {model_name_loaded} - currently in use or queued")
                 continue
             
-            unloadable_models.append({
+            offloadable_models.append({
                 'name': model_name_loaded,
                 'size': model.get('size', 0) / (1024**2),
             })
         
-        if not unloadable_models:
-            logger.warning("No models available to unload - all are in use or queued")
+        if not offloadable_models:
+            logger.warning("No models available to offload - all are in use or queued")
             return {
                 "status": "insufficient_vram",
                 "message": "All loaded models are in use. Unable to free VRAM.",
@@ -174,44 +193,55 @@ def load_or_queue_model(model_name:str, gpu_index:int=0):
                 "available_vram": vram_usage['free']
             }
         
-        # Sort by size (unload smallest first)
-        unloadable_models.sort(key=lambda x: x['size'])
+        required_extra = max(0, model_size - vram_usage['free'])
+        to_offload = select_models_to_offload(offloadable_models, required_extra)
+
+        if not to_offload:
+            logger.warning(
+                f"Unable to find any combination of offloadable models to free "
+                f"{required_extra:.2f} MiB for {model_name}"
+            )
+            return {
+                "status": "insufficient_vram",
+                "message": "Unable to free sufficient VRAM",
+                "model": model_name,
+                "required_vram": model_size,
+                "available_vram": vram_usage['free'],
+                "offloaded": [],
+            }
         
         freed_space = 0
-        unloaded_models = []
+        offloaded_models = []
         
-        for model in unloadable_models:
-            if freed_space + vram_usage['free'] >= model_size:
-                break
-            
+        for model in to_offload:
             try:
                 ollama_client.generate(model=model['name'], prompt="", keep_alive=0)
                 freed_space += model['size']
-                unloaded_models.append(model['name'])
-                logger.info(f"Unloaded model: {model['name']} ({model['size']:.2f} MiB)")
+                offloaded_models.append(model['name'])
+                logger.info(f"Offloaded model: {model['name']} ({model['size']:.2f} MiB)")
             except Exception as e:
-                logger.warning(f"Failed to unload model {model['name']}: {str(e)}")
+                logger.warning(f"Failed to offload model {model['name']}: {str(e)}")
         
         if freed_space + vram_usage['free'] >= model_size:
             logger.info(f"Freed {freed_space:.2f} MiB. Loading model {model_name}")
             ollama_client.generate(model=model_name, prompt="", keep_alive=-1)
             return {
                 "status": "loaded",
-                "message": f"Model loaded after unloading {len(unloaded_models)} model(s)",
+                "message": f"Model loaded after offloading {len(offloaded_models)} model(s)",
                 "model": model_name,
-                "unloaded": unloaded_models,
+                "offloaded": offloaded_models,
                 "freed_vram": freed_space
             }
         
         # Still not enough space
-        logger.warning(f"Unable to free sufficient VRAM for {model_name}")
+        logger.warning(f"Unable to free sufficient VRAM for {model_name} even after offloading selected models")
         return {
             "status": "insufficient_vram",
             "message": "Unable to free sufficient VRAM",
             "model": model_name,
             "required_vram": model_size,
             "available_vram": vram_usage['free'] + freed_space,
-            "unloaded": unloaded_models
+            "offloaded": offloaded_models
         }
 
     except Exception as e:
@@ -232,7 +262,7 @@ def cleanup_inactive_model_tracking():
 
             if model_name not in loaded_model_names:
                 r.delete(key)
-                logger.info(f"Cleaned up stale tracking for unloaded model: {model_name}")
+                logger.info(f"Cleaned up stale tracking for offloaded model: {model_name}")
         
     except Exception as e:
         logger.error(f"Error in cleanup_inactive_model_tracking: {str(e)}")
