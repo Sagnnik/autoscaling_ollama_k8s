@@ -35,9 +35,15 @@ def streaming_data():
                 continue
 
             if message and message['type'] == "message":
-                data = message['data']
+                raw = message['data']
+                if isinstance(raw, bytes):
+                    data = raw.decode('utf-8', errors='replace')
+                else:
+                    data = raw
+
                 if data == '[DONE]':
                     break
+
                 yield data
     finally:
         pubsub.unsubscribe(channel_id)

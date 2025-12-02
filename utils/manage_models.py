@@ -2,7 +2,7 @@ import pynvml
 import ollama
 from ollama import Client
 from services.logger import logger
-from services.redis_client import get_redis_client
+from services.redis_client import get_redis_client, RedisLock
 from services.cache import get_active_models, get_queued_models
 import os
 from itertools import combinations
@@ -112,7 +112,7 @@ def load_or_queue_model(model_name:str, gpu_index:int=0):
         - see if there are inactive models for offloading
         - see there isn't same model request in the task queue already
         - if same models are in queue add task to queue
-        - offload in smallest models first
+        - find the subset of models to offload (minimize the number of models)
         - queue the request if unable to free enough vram
 
     Returns:
@@ -132,13 +132,23 @@ def load_or_queue_model(model_name:str, gpu_index:int=0):
     """
     try:
         ollama_client = Client(host=OLLAMA_HOST)
-        model_size = get_model_size(ollama_client, model_name)
-        vram_usage = get_vram_usage(gpu_index)
 
+        model_size = get_model_size(ollama_client, model_name)
         if not model_size or not vram_usage:
             logger.error("Failed to get model size or VRAM usage")
             return {"status": "error", "message": "Unable to retrieve system information"}
-
+        
+        # Need to acquire the lock
+        lock = RedisLock(name=f"gpu:{gpu_index}", ttl=10)
+        if not lock.acquire(block=True, timeout=5):
+            logger.warning(f"Could not acquire GPU lock for GPU index: {gpu_index}")
+            return {"status": "insufficient_vram", "message": "GPU busy, try later", "model": model_name}
+        
+        vram_usage = get_vram_usage(gpu_index)
+        if not vram_usage:
+            logger.error("Failed to get VRAM usage")
+            return {"status": "error", "message": "Unable to retrieve VRAM usage"}
+        
         # Check if model size exceeds total VRAM
         if model_size > vram_usage['total']:
             error_msg = f"Model size ({model_size:.2f} MiB) exceeds total VRAM ({vram_usage['total']:.2f} MiB)"
@@ -247,6 +257,8 @@ def load_or_queue_model(model_name:str, gpu_index:int=0):
     except Exception as e:
         logger.exception(f"Error in load_or_queue_model: {str(e)}")
         return {"status": "error", "message": str(e)}
+    finally:
+        lock.release()
 
 def cleanup_inactive_model_tracking():
     """Remove stale entries from Redis for models no longer needed"""
