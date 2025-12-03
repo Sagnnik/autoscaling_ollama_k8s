@@ -17,11 +17,40 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-if "channel_id" not in st.session_state:
-    st.session_state.channel_id = uuid4().hex
+def init_state():
+    if "chats" not in st.session_state:
+        # chats: {chat_id: {"title": str, "messages": [...], "channel_id": str}}
+        first_chat_id = uuid4().hex
+        st.session_state.chats = {
+            first_chat_id: {
+                "title": "New chat",
+                "messages": [],
+                "channel_id": uuid4().hex,
+            }
+        }
+        st.session_state.current_chat_id = first_chat_id
 
-channel_id = st.session_state.channel_id
-def streaming_data():
+init_state()
+
+def get_current_chat():
+    chat_id = st.session_state.current_chat_id
+    return chat_id, st.session_state.chats[chat_id]
+
+def create_new_chat():
+    chat_id = uuid4().hex
+    st.session_state.chats[chat_id] = {
+        "title": "New chat",
+        "messages": [],
+        "channel_id": uuid4().hex,
+    }
+    st.session_state.current_chat_id = chat_id
+
+def rename_chat_if_needed(chat, first_user_message: str):
+    if chat["title"] == "New chat":
+        chat["title"] = first_user_message[:30] + ("…" if len(first_user_message) > 30 else "")
+
+
+def streaming_data(channel_id: str):
     redis_client = get_redis_client()
     pubsub = redis_client.pubsub()
     pubsub.subscribe(channel_id)
@@ -31,7 +60,7 @@ def streaming_data():
             message = pubsub.get_message(ignore_subscribe_messages=True)
             # prevents 100% CPU
             if not message:
-                time.sleep(0.01)   
+                time.sleep(0.01)
                 continue
 
             if message and message['type'] == "message":
@@ -54,9 +83,8 @@ def streaming_data():
 st.title("LLM Autoscaler")
 
 with st.sidebar:
-    if st.button('New Chat', type='primary'):
-        st.session_state.messages = []
-        st.session_state.channel_id = str(uuid4().hex)
+    if st.button('New Chat', type='primary', use_container_width=True):
+        create_new_chat()
         st.rerun()
 
     o_client = None
@@ -67,10 +95,9 @@ with st.sidebar:
     st.subheader("Model management")
 
     default_models = ['qwen2.5:0.5b', 'qwen3:1.7b', 'qwen3:4b']
-    preset_model = st.selectbox("Choose a preset model", default_models)
-    custom_model = st.text_input("Or enter another model name", placeholder="e.g. llama3:8b")
+    custom_model = st.text_input("Enter the name of the model to Pull", placeholder="e.g. llama3:8b")
 
-    model_to_pull = custom_model.strip() if custom_model.strip() else preset_model
+    model_to_pull = custom_model.strip() if custom_model.strip() else default_models[0]
 
     if o_client is not None:
         if st.button("Pull model"):
@@ -113,18 +140,35 @@ with st.sidebar:
             "Select a model to chat with",
             tuple(default_models)
         )
+    st.divider()
+    st.header("History")
+    current_chat_id, current_chat = get_current_chat()
+    for chat_id, chat in reversed(list(st.session_state.chats.items())):
+        is_current = (chat_id == current_chat_id)
+        label = ("🟢 " if is_current else "⚪ ") + (chat["title"] or "Untitled")
+        if st.button(label, key=f"chat_btn_{chat_id}", use_container_width=True):
+            st.session_state.current_chat_id = chat_id
+            st.rerun()
 
-if 'messages' not in st.session_state:
-    st.session_state.messages = []
+current_chat_id, current_chat = get_current_chat()
 
-for message in st.session_state.messages:
+for message in current_chat["messages"]:
     with st.chat_message(message['role']):
         st.markdown(message['content'])
 
 if prompt := st.chat_input("what's up?"):
+    rename_chat_if_needed(current_chat, prompt)
+
+    channel_id = current_chat["channel_id"]
+
     # enqueue task
-    process_ollama_request.delay(query=prompt, channel_id=channel_id, model_name=model_name)
-    st.session_state.messages.append({'role': 'user', 'content': prompt})
+    process_ollama_request.delay(
+        query=prompt,
+        channel_id=channel_id,
+        model_name=model_name
+    )
+
+    current_chat["messages"].append({'role': 'user', 'content': prompt})
     with st.chat_message('user'):
         st.markdown(prompt)
 
@@ -136,6 +180,8 @@ if prompt := st.chat_input("what's up?"):
                 full_response.append(chunk)
                 yield chunk
 
-        response = st.write_stream(collect_stream(streaming_data()))
+        response = st.write_stream(collect_stream(streaming_data(channel_id)))
 
-    st.session_state.messages.append({"role": "assistant", "content": "".join(full_response)})
+    current_chat["messages"].append(
+        {"role": "assistant", "content": "".join(full_response)}
+    )
