@@ -1,14 +1,14 @@
 import streamlit as st
 from uuid import uuid4
-from ollama import Client
-from worker.celery_app import process_ollama_request
+import requests
 from services.redis_client import get_redis_client
 import time
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 st.set_page_config(
     page_title="LLM Autoscaler",
@@ -49,12 +49,10 @@ def rename_chat_if_needed(chat, first_user_message: str):
     if chat["title"] == "New chat":
         chat["title"] = first_user_message[:30] + ("…" if len(first_user_message) > 30 else "")
 
-
 def streaming_data(channel_id: str):
     redis_client = get_redis_client()
     pubsub = redis_client.pubsub()
     pubsub.subscribe(channel_id)
-    st.info(f"Subscribed to {channel_id}")
     try:
         while True:
             message = pubsub.get_message(ignore_subscribe_messages=True)
@@ -65,14 +63,10 @@ def streaming_data(channel_id: str):
 
             if message and message['type'] == "message":
                 raw = message['data']
-                if isinstance(raw, bytes):
-                    data = raw.decode('utf-8', errors='replace')
-                else:
-                    data = raw
+                data = raw.decode('utf-8', errors='replace') if isinstance(raw, bytes) else raw
 
                 if data == '[DONE]':
                     break
-
                 yield data
     finally:
         pubsub.unsubscribe(channel_id)
@@ -87,59 +81,37 @@ with st.sidebar:
         create_new_chat()
         st.rerun()
 
-    o_client = None
-    try:
-        o_client = Client(host=OLLAMA_HOST)
-    except Exception as e:
-        st.error(f"Failed to connect to Ollama at {OLLAMA_HOST}: {e}")
     st.subheader("Model management")
 
-    default_models = ['qwen2.5:0.5b', 'qwen3:1.7b', 'qwen3:4b']
+    default_models = ['qwen2.5:0.5b']
     custom_model = st.text_input("Enter the name of the model to Pull", placeholder="e.g. llama3:8b")
-
     model_to_pull = custom_model.strip() if custom_model.strip() else default_models[0]
 
-    if o_client is not None:
-        if st.button("Pull model"):
-            status_placeholder = st.empty()
-            try:
-                with st.spinner(f"Pulling `{model_to_pull}` from Ollama..."):
-                    # stream=True returns progress chunks
-                    for progress in o_client.pull(model=model_to_pull, stream=True):
-                        # progress is typically a dict with fields like status, completed, total, digest
-                        status = progress.get("status", "")
-                        completed = progress.get("completed")
-                        total = progress.get("total")
-                        if completed is not None and total:
-                            status_placeholder.write(
-                                f"{status} - {completed}/{total} bytes"
-                            )
-                        else:
-                            status_placeholder.write(status)
-
-                st.success(f"Model `{model_to_pull}` pulled successfully ✅")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Failed to pull model `{model_to_pull}`: {e}")
+    if st.button("Pull model"):
+        try:
+            with st.spinner(f"Requesting to pull `{model_to_pull}`..."):
+                response = requests.post(f"{API_BASE_URL}/api/v1/pull", json={"model_name": model_to_pull})
+                response.raise_for_status()
+            st.success(f"Pull request for `{model_to_pull}` sent successfully! It will be available shortly.")
+            time.sleep(2)
+            st.rerun()
+        except requests.exceptions.RequestException as e:
+            st.error(f"Failed to send pull request for `{model_to_pull}`: {e}")
 
     model_list = set()
-    if o_client is not None:
-        try:
-            pulled_models = o_client.list()
-            for model in pulled_models.get('models', []):
-                m = model.get('model')
-                if m:
-                    model_list.add(m)
-        except Exception as e:
-            st.error(f"Failed loading pulled model list: {e}")
+    try:
+        response = requests.get(f"{API_BASE_URL}/api/v1/models")
+        response.raise_for_status()
+        pulled_models = response.json()
+        model_list.update(pulled_models)
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to fetch model list from API: {e}")
 
     if model_list:
         model_name = st.selectbox("Select a model to chat with", sorted(model_list))
     else:
-        model_name = st.selectbox(
-            "Select a model to chat with",
-            tuple(default_models)
-        )
+        model_name = st.selectbox("Select a model to chat with", tuple(default_models))
+
     st.divider()
     st.header("History")
     current_chat_id, current_chat = get_current_chat()
@@ -158,30 +130,22 @@ for message in current_chat["messages"]:
 
 if prompt := st.chat_input("what's up?"):
     rename_chat_if_needed(current_chat, prompt)
-
     channel_id = current_chat["channel_id"]
 
-    # enqueue task
-    process_ollama_request.delay(
-        query=prompt,
-        channel_id=channel_id,
-        model_name=model_name
-    )
+    try:
+        requests.post(
+            f"{API_BASE_URL}/api/v1/chat",
+            json={"query": prompt, "model_name": model_name, "channel_id": channel_id},
+        ).raise_for_status()
 
-    current_chat["messages"].append({'role': 'user', 'content': prompt})
-    with st.chat_message('user'):
-        st.markdown(prompt)
+        current_chat["messages"].append({'role': 'user', 'content': prompt})
+        with st.chat_message('user'):
+            st.markdown(prompt)
 
-    with st.chat_message('assistant'):
-        full_response = []
+        with st.chat_message('assistant'):
+            response = st.write_stream(streaming_data(channel_id))
 
-        def collect_stream(chunks):
-            for chunk in chunks:
-                full_response.append(chunk)
-                yield chunk
+        current_chat["messages"].append({"role": "assistant", "content": response})
 
-        response = st.write_stream(collect_stream(streaming_data(channel_id)))
-
-    current_chat["messages"].append(
-        {"role": "assistant", "content": "".join(full_response)}
-    )
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to send message: {e}")
