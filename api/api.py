@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
     logger.info("[Ollama Client] Connecting...")
     ollama_client = ollama.Client(host=OLLAMA_HOST)
 
-    yield  # <-- startup finished, app is running
+    yield
 
     logger.info("[Ollama Client] Disconnected.")
     ollama_client = None

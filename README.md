@@ -31,7 +31,8 @@ An intelligent, resource-aware serving platform for Ollama models, designed for 
 
 The system is composed of several microservices that work together:
 
-- **Streamlit**: The web-based frontend and user interface for interacting with the models.
+- **FastAPI Backend**: A central API server that exposes endpoints for chat, model management, and task status.
+- **Streamlit**: The web-based frontend and user interface for interacting with the models. It consumes the FastAPI backend.
 - **Ollama**: The core server that runs the large language models.
 - **Celery Workers**: Background workers that handle the heavy lifting of model loading and inference requests.
 - **Redis**: Acts as the message broker for Celery and a cache for storing application state (e.g., which models are active, queued, or reserved).
@@ -39,17 +40,17 @@ The system is composed of several microservices that work together:
 - **Flower**: A monitoring tool for inspecting the status of Celery workers and tasks.
 
 ```
-+----------------+      +----------------+      +----------------+
-|   Streamlit    |----->|     Redis      |<-----| Celery Worker  |
-| (Web Frontend) |      | (Broker/Cache) |      | (Model/Task Proc)|
-+----------------+      +----------------+      +----------------+
-       |                      ^      ^                 |
-       | (HTTP)               |      | (Pub/Sub)       | (Ollama API)
-       v                      |      |                 v
-+----------------+      +----------------+      +----------------+
-| User's Browser |      |  Celery Beat   |      |     Ollama     |
-+----------------+      | (Periodic Tasks) |      | (LLM Server/GPU) |
-                        +----------------+      +----------------+
++----------------+      +------------------+      +------------------+      +----------------+
+| User's Browser |----->|     Streamlit    |----->|  FastAPI Backend |----->|     Redis      |
++----------------+      | (Web Frontend)   |      |   (API Server)   |      | (Broker/Cache) |
+                        +------------------+      +------------------+      +----------------+
+                                                      |         ^                  ^
+                                                      | (Celery)|              (Pub/Sub)      
+                                                      v         |                  |
+                                                +------------------+      +------------------+
+                                                | Celery Worker    |----->|     Ollama       |
+                                                | (Model/Task Proc)|      | (LLM Server/GPU) |
+                                                +------------------+      +------------------+
 ```
 
 ## Getting Started
@@ -95,11 +96,38 @@ You will be greeted with the main chat interface. From here, you can:
 
 *<-- Placeholder for a screenshot of the main chat interface -->*
 
-### Pulling Models
+### API Usage
 
-In the sidebar, you can find the "Model management" section. Enter the name of a model you want to use (e.g., `llama3:8b`) and click "Pull model". The application will stream the download progress and make the model available in the selection dropdown upon completion.
+The backend API is available at `http://localhost:8000`.
 
-*<-- Placeholder for a screenshot of the model pulling interface -->*
+**Get a list of available models:**
+```bash
+curl -X GET "http://localhost:8000/api/v1/models"
+```
+
+**Pull a new model:**
+```bash
+curl -X POST "http://localhost:8000/api/v1/pull" \
+-H "Content-Type: application/json" \
+-d '{"model_name": "llama3:8b"}'
+```
+
+**Start a chat session:**
+```bash
+curl -X POST "http://localhost:8000/api/v1/chat" \
+-H "Content-Type: application/json" \
+-d '{
+    "query": "Why is the sky blue?",
+    "model_name": "llama3:8b",
+    "channel_id": "my-unique-channel-id"
+}'
+```
+This will return a `task_id`. You can use this to check the status of the task.
+
+**Check task status:**
+```bash
+curl -X GET "http://localhost:8000/api/v1/task/{task_id}"
+```
 
 ### Monitoring with Flower
 
@@ -152,6 +180,9 @@ The current focus is on finalizing the Kubernetes deployment scripts and configu
 	[ x ] UI improvements
 		- Enable model pull
 		- New chat and chat history
+	[ x ] Decouple backend and frontend
+		- Added FastAPI backend
+		- Streamlit uses the backend
 	[ ] Create k8s deployment
 ```
 </details>
